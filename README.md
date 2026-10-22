@@ -310,6 +310,8 @@ checkpoint state, and output directories inside the source model directory.
 
 ### Supported Models
 
+Qwen3.8-Flash-Next is registered as `qwen4_exp`; see the [NPU training guide](docs/runs/qwen4_exp/README_NPU.md).
+
 Built-in models are discovered from `src/torchturbo/models/`. Public environment setup and run instructions are currently available under `docs/runs/`:
 
 ```text

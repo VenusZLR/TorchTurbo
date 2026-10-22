@@ -266,6 +266,8 @@ torchrun --nproc_per_node=8 scripts/checkpoint/dcp_to_hf.py \
 位于源模型目录内，脚本也会报错。
 
 ### 支持模型
+
+Qwen3.8-Flash-Next 注册名为 `qwen4_exp`，参见 [NPU 训练指南](docs/runs/qwen4_exp/README_NPU.md)。
 内置模型从 `src/torchturbo/models/` 自动发现。模型的公开环境说明和运行文档位于 `docs/runs/`：
 
 ```text

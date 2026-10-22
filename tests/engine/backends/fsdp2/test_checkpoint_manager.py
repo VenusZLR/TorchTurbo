@@ -191,6 +191,70 @@ def test_resume_matches_uninterrupted_training(manager, tmp_path, accelerated):
     )
 
 
+@pytest.mark.parametrize("saved_ep_size,current_ep_size", [(1, 2), (2, 1)])
+def test_optimizer_restore_rejects_ep_changes_before_mutation(
+    manager, tmp_path, saved_ep_size, current_ep_size
+):
+    manager._config.parallel_plan.ep_size = saved_ep_size
+    model = ConvertibleModel()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.02)
+    model.layer(torch.ones(1, 2)).sum().backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    manager.save_model(model, str(tmp_path), source_path="unused")
+    manager.save_optimizer_and_scheduler(model, optimizer, None, str(tmp_path))
+
+    manager._parallel_context["ep"]["ep_size"] = current_ep_size
+    resumed = ConvertibleModel()
+    resumed_optimizer = torch.optim.AdamW(resumed.parameters(), lr=0.07)
+    with pytest.raises(
+        ValueError, match=f"saved EP size {saved_ep_size}.*{current_ep_size}"
+    ):
+        manager.load_optimizer_and_scheduler(
+            resumed, resumed_optimizer, None, str(tmp_path)
+        )
+    assert not resumed_optimizer.state
+    assert resumed_optimizer.param_groups[0]["lr"] == 0.07
+
+
+@pytest.mark.parametrize("ep_size", [1, 2])
+@pytest.mark.parametrize("frozen", [False, True])
+def test_optimizer_restore_keeps_unused_parameters_without_state(
+    manager, tmp_path, ep_size, frozen
+):
+    manager._config.parallel_plan.ep_size = ep_size
+    manager._parallel_context["ep"]["ep_size"] = ep_size
+
+    def build():
+        model = ConvertibleModel()
+        model.unused = nn.Linear(2, 2)
+        model.unused.requires_grad_(not frozen)
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=0.02,
+        )
+        return model, optimizer
+
+    model, optimizer = build()
+    model.layer(torch.ones(1, 2)).sum().backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    manager.save_model(model, str(tmp_path), source_path="unused")
+    manager.save_optimizer_and_scheduler(model, optimizer, None, str(tmp_path))
+
+    resumed, resumed_optimizer = build()
+    manager.load_optimizer_and_scheduler(
+        resumed, resumed_optimizer, None, str(tmp_path)
+    )
+    assert all(
+        parameter not in resumed_optimizer.state
+        for parameter in resumed.unused.parameters()
+    )
+    torch.testing.assert_close(
+        resumed_optimizer.state_dict(), optimizer.state_dict(), rtol=0, atol=0
+    )
+
+
 @pytest.mark.parametrize("lora", [False, True])
 def test_load_model_restores_hf_exports_with_a_warning(
     manager, recorder, tmp_path, monkeypatch, lora

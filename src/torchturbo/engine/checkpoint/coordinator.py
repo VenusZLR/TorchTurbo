@@ -187,6 +187,16 @@ class CheckpointCoordinator:
                     f"Optimizer state in {optimizer_dir} is incomplete; the save was "
                     "interrupted. Resume from an earlier checkpoint."
                 )
+            metadata = load_metadata(checkpoint_dir)
+            if metadata is not None:
+                saved_ep_size = metadata["engine_config"]["parallel_plan"]["ep_size"]
+                current_ep_size = self._parallel_context["ep"]["ep_size"]
+                if saved_ep_size != current_ep_size:
+                    raise ValueError(
+                        f"Checkpoint {checkpoint_dir} saved EP size {saved_ep_size}, "
+                        f"but the current run uses EP size {current_ep_size}. "
+                        "Optimizer state requires matching EP sizes."
+                    )
             scheduler_state = None
             if lr_scheduler is not None:
                 scheduler_state = layout.load_scheduler(checkpoint_dir)

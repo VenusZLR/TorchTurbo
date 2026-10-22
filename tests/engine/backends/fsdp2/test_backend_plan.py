@@ -20,6 +20,7 @@ from torchturbo.engine.backends.fsdp2.backend import FSDP2Backend
 from torchturbo.engine.backends.fsdp2.config import CPUOffloadMode
 from torchturbo.engine.model_fqn import build_model_fqn_map
 from torchturbo.models.bailing_moe_v3_vl.vision_balance import BailingVisionBalanceIO
+from torchturbo.models.modules.cpu_resident import NodeSharedCPUResidentParameter
 from torchturbo.parallel import (
     FSDPParallelPlan,
     FSDPPlanSpec,
@@ -223,6 +224,28 @@ def test_standalone_world_shard_skips_default_descendant_wrapping(monkeypatch):
         ("language_model", "world"),
         ("root", "world"),
     ]
+
+
+@pytest.mark.parametrize("device", ["meta", "cpu"])
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_cpu_resident_parameters_must_be_frozen(tmp_path, device, requires_grad):
+    backend = make_backend()
+    model = nn.Module()
+    model.table = NodeSharedCPUResidentParameter(
+        torch.ones(2, device=device), requires_grad=requires_grad, directory=tmp_path
+    )
+    model.weight = nn.Parameter(torch.ones(2, device=device))
+    plan = resolve_plan(
+        model, FSDPParallelPlan(plan={"weight": FSDPPlanSpec(no_shard=True)})
+    )
+
+    if requires_grad:
+        with pytest.raises(AssertionError, match="CPU resident.*frozen.*table"):
+            backend._collect_no_shard(model, plan)
+    else:
+        ignored, modules = backend._collect_no_shard(model, plan)
+        assert ignored == {model.table, model.weight}
+        assert modules == []
 
 
 def test_no_shard_matches_parameter_names(monkeypatch):

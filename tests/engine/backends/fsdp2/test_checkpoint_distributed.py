@@ -246,6 +246,7 @@ def _run_shard_read_failure_test(
         # Spawned workers import their own copy of the module.
         weight_loader.load_file = load_file
         loader = weight_loader.DistParamLoader.__new__(weight_loader.DistParamLoader)
+        loader.model = nn.Module()
         loader.rank = rank
         loader.path = Path(weights_dir)
         loader.local_params = {"weight"}

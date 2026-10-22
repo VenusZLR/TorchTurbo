@@ -52,9 +52,9 @@ from fla_npu.ops.ascendc import (
 from fla_npu.ops.triton import (
     chunk_local_cumsum,
     chunk_scaled_dot_kkt_fwd,
-    l2norm_bwd,
-    l2norm_fwd,
 )
+
+from .l2norm import l2norm_bwd, l2norm_fwd
 
 
 TensorIndexDict = Dict[str, Optional[torch.Tensor]]
