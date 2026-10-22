@@ -147,11 +147,12 @@ def qsa_indexer_forward(
 
             tail_start = complete_blocks * ratio
             tail_length = query_positions + 1 - tail_start
-            rows, columns = torch.where(tail_offsets[None, :] < tail_length[:, None])
-            destinations = num_selected_blocks[rows] * ratio + columns
-            chunk_ids[rows, destinations] = (
-                segment_start + tail_start[rows] + columns
+            destinations = num_selected_blocks[:, None] * ratio + tail_offsets[None, :]
+            tail_ids = segment_start + tail_start[:, None] + tail_offsets[None, :]
+            tail_ids = torch.where(
+                tail_offsets[None, :] < tail_length[:, None], tail_ids, -1
             ).to(torch.int32)
+            chunk_ids.scatter_(1, destinations, tail_ids)
 
     return selected_token_ids
 
