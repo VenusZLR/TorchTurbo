@@ -136,7 +136,7 @@ def qsa_indexer_forward(
                 scores.masked_fill_(~visible_blocks, torch.finfo(scores.dtype).min)
                 topk = min(indexer.block_topk, num_candidate_blocks)
                 block_ids = scores.topk(topk, dim=-1).indices
-                valid_blocks = visible_blocks.gather(1, block_ids)
+                valid_blocks = block_ids < complete_blocks[:, None]
                 num_selected_blocks = valid_blocks.sum(dim=1)
                 token_ids = (
                     segment_start + block_ids.unsqueeze(-1) * ratio + block_offsets
