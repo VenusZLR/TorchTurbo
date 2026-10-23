@@ -39,6 +39,7 @@ def make_checkpoint(path, dtype=torch.float32, shard_sizes=None):
     layer.ple_embedding.ngram_embedding = impl.NGramEmbedding(
         torch.empty(rows.shape, device="meta", dtype=torch.float32)
     )
+    layer.ple_embedding.ngram_embedding.weight.directory = path.parent
     decoder = nn.Module()
     decoder.ple = layer
     text = nn.Module()
@@ -81,7 +82,7 @@ def load_tables(text, path):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_load_source_shards_into_unlinked_shared_table(
-    tmp_path, monkeypatch, node_group, dtype
+    tmp_path, node_group, dtype
 ):
     text, expected = make_checkpoint(tmp_path / "source", dtype)
     storage = tmp_path
@@ -102,12 +103,11 @@ def test_load_source_shards_into_unlinked_shared_table(
 
 
 def test_load_source_shards_preserves_uneven_row_sizes(
-    tmp_path, monkeypatch, node_group
+    tmp_path, node_group
 ):
     num_rows = new_reference().ple_embedding.ngram_embedding.weight.shape[0]
     sizes = (1, 2, 3, num_rows - 6)
     text, expected = make_checkpoint(tmp_path / "source", shard_sizes=sizes)
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
 
     load_tables(text, tmp_path / "source")
 
@@ -119,7 +119,7 @@ def test_load_source_shards_preserves_uneven_row_sizes(
 
 @pytest.mark.parametrize("invalid", ["row_count", "embedding_dim", "mixed_dtype"])
 def test_invalid_source_shards_fail_before_mapping(
-    tmp_path, monkeypatch, node_group, invalid
+    tmp_path, node_group, invalid
 ):
     from safetensors.torch import load_file
 
@@ -135,7 +135,6 @@ def test_invalid_source_shards_fail_before_mapping(
     else:
         tensors[name] = tensor.double()
     save_file(tensors, str(source / "model.safetensors"))
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
 
     with pytest.raises(ValueError, match="PLE|shard|row"):
         load_tables(text, source)
@@ -143,21 +142,20 @@ def test_invalid_source_shards_fail_before_mapping(
 
 
 def test_missing_source_shard_fails_without_leaking_file(
-    tmp_path, monkeypatch, node_group
+    tmp_path, node_group
 ):
     text, _ = make_checkpoint(tmp_path / "source")
     index_path = tmp_path / "source/model.safetensors.index.json"
     index = json.loads(index_path.read_text())
     index["weight_map"].pop(next(iter(index["weight_map"])))
     index_path.write_text(json.dumps(index))
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
     with pytest.raises((ValueError, KeyError), match="shard_0"):
         load_tables(text, tmp_path / "source")
     assert not list(tmp_path.glob("torchturbo-cpu-resident-*"))
 
 
 def test_source_free_materialization_allocates_registered_cpu_table(
-    tmp_path, monkeypatch, node_group
+    tmp_path, node_group
 ):
     text = nn.Module()
     decoder = nn.Module()
@@ -166,7 +164,7 @@ def test_source_free_materialization_allocates_registered_cpu_table(
     embedding = impl.NGramEmbedding(torch.empty_like(rows, device="meta"))
     decoder.ple.ple_embedding.ngram_embedding = embedding
     text.layers = nn.ModuleList([decoder])
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
+    embedding.weight.directory = tmp_path
 
     embedding.weight.materialize_()
 

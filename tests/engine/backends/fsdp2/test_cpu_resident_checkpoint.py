@@ -70,7 +70,6 @@ def _source(path):
 def _worker(rank, world_size, root):
     root = Path(root)
     os.environ["LOCAL_WORLD_SIZE"] = "2"
-    os.environ["TORCHTURBO_PLE_SHM_DIR"] = str(root)
     torch.set_num_threads(1)
     dist.init_process_group(
         "gloo",
@@ -84,6 +83,7 @@ def _worker(rank, world_size, root):
         world_mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp",))
         model = ResidentModel()
         parameter = model.ngram_embedding.weight
+        parameter.directory = root
         converter = Qwen4ExpWeightConverter(
             model,
             {"ep": {"ep_group": mesh["ep"].get_group(), "ep_rank": 0, "ep_size": 1}},

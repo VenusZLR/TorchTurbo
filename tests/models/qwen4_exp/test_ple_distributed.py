@@ -194,9 +194,9 @@ def _run_loading(rank: int, init_file: str, source: str, storage: str, fail: boo
     _init_process_group(rank, 2, init_file)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["LOCAL_WORLD_SIZE"] = "2"
-    os.environ["TORCHTURBO_PLE_SHM_DIR"] = storage
     try:
         text = _new_loading_text()
+        text.layers[0].ple.ple_embedding.ngram_embedding.weight.directory = Path(storage)
         if fail and rank == 1:
 
             from torchturbo.engine.backends.fsdp2.checkpoint import weight_loader

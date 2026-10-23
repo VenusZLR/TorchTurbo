@@ -51,9 +51,6 @@ export WANDB_DISABLED=True
 export TRANSFORMERS_VERBOSITY=error
 export ASCEND_PROCESS_LOG_PATH="${OUTPUT_DIR}/ascend_log"
 export PYTHONPATH="${REPO_ROOT}/src${SWIFT_SRC_DIR:+:${SWIFT_SRC_DIR}}${PYTHONPATH:+:${PYTHONPATH}}"
-# The frozen PLE table is allocated once per node, separately from optimizer offload.
-export TORCHTURBO_PLE_SHM_DIR=${TORCHTURBO_PLE_SHM_DIR:-/dev/shm}
-
 mkdir -p "${OUTPUT_DIR}"
 if [ "${NODE_RANK}" -eq 0 ]; then
     cp -f "$0" "${OUTPUT_DIR}/"

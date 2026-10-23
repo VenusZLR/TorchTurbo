@@ -24,8 +24,7 @@ from .test_model import _patch_cpu_qsa, _small_config
 
 
 @pytest.fixture
-def cpu_engine(monkeypatch, tmp_path, node_group):
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
+def cpu_engine(monkeypatch, node_group):
     # Retain HF support checks and the real engine lifecycle on a CPU backend.
     monkeypatch.setitem(
         hf_modeling.FLASH_ATTENTION_COMPATIBILITY_MATRIX[2],
@@ -185,10 +184,9 @@ def test_default_dpo_reference_copies_registered_tables_without_source_loading(
     "wrap_source,wrap_target", [(True, False), (False, True), (True, True)]
 )
 def test_registered_table_copy_supports_peft_wrappers(
-    wrap_source, wrap_target, tmp_path, monkeypatch
+    wrap_source, wrap_target
 ):
     peft = pytest.importorskip("peft")
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
     source = TurboQwen4ExpForConditionalGeneration(_small_config())
     with torch.device("meta"):
         target = TurboQwen4ExpForConditionalGeneration(_small_config())

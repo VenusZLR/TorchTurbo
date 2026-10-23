@@ -10,9 +10,8 @@ from torchturbo.models.modules.cpu_resident import NodeSharedCPUResidentParamete
 
 
 @pytest.fixture
-def node_group(tmp_path, tmp_path_factory, monkeypatch):
+def node_group(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "1")
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
     init_file = tmp_path_factory.mktemp("qwen-node-group") / "init"
     dist.init_process_group(
         "gloo", init_method=f"file://{init_file}", rank=0, world_size=1

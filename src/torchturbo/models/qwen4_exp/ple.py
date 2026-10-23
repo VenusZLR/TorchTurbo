@@ -1,17 +1,14 @@
 """Frozen CPU n-gram lookup and sequence-parallel PLE execution.
 
 The n-gram tables are frozen and shared by the processes on each node through
-one memory-mapped file per table. The file is created in ``/dev/shm`` unless
-the ``TORCHTURBO_PLE_SHM_DIR`` environment variable names another
-node-visible directory; it is unlinked once every process has mapped it.
+one memory-mapped file per table in ``/dev/shm``. The file is unlinked once
+every process has mapped it.
 """
 
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -40,7 +37,6 @@ __all__ = [
 
 # Bound temporary FP32 activations in both convolution passes.
 _PLE_CONV_WINDOW_TOKENS = 8192
-_SHM_DIR_VARIABLE = "TORCHTURBO_PLE_SHM_DIR"
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +133,7 @@ class NGramEmbedding(nn.Module):
         self.weight = NodeSharedCPUResidentParameter(
             weight.detach(),
             requires_grad=False,
-            directory=Path(os.environ.get(_SHM_DIR_VARIABLE, "/dev/shm")),
+            directory="/dev/shm",
         )
 
     def gather(self, row_ids: torch.Tensor) -> torch.Tensor:

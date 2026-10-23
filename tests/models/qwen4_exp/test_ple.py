@@ -78,12 +78,12 @@ def test_ngram_matches_upstream_eos_and_packed_samples(sp_size, dtype):
         )
 
 
-def test_shared_table_and_upstream_fallback(tmp_path, monkeypatch, node_group):
+def test_shared_table_and_upstream_fallback(tmp_path, node_group):
     reference = new_reference()
     dense = reference.ple_embedding.ngram_embedding.weight
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
     layer = adapted(reference)
     embedding = layer.ple_embedding.ngram_embedding
+    embedding.weight.directory = tmp_path
     embedding.weight.materialize_()
     ids = torch.tensor([[3, 2, 4, 5, 6]])
     torch.testing.assert_close(

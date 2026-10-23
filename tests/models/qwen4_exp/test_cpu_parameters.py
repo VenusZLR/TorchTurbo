@@ -13,13 +13,13 @@ from torchturbo.models.qwen4_exp.ple import NGramEmbedding
 
 @pytest.mark.parametrize("full_offload", [False, True])
 def test_backend_materializes_resident_parameters_on_cpu(
-    tmp_path, monkeypatch, node_group, full_offload
+    tmp_path, node_group, full_offload
 ):
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
     with torch.device("meta"):
         model = nn.Module()
         model.table = NGramEmbedding(torch.empty(16, 4))
         model.proj = nn.Linear(4, 4)
+    model.table.weight.directory = tmp_path
     backend = object.__new__(FSDP2Backend)
     backend.fsdp_config = SimpleNamespace(
         cpu_offload=SimpleNamespace(enabled=full_offload, mode=CPUOffloadMode.FULL)
@@ -59,12 +59,12 @@ def test_backend_keeps_resident_descendants_on_cpu(monkeypatch):
 
 
 def test_deepcopy_keeps_registered_weight_connected_to_lookup(
-    tmp_path, monkeypatch, node_group
+    tmp_path, node_group
 ):
     import copy
 
-    monkeypatch.setenv("TORCHTURBO_PLE_SHM_DIR", str(tmp_path))
     original = NGramEmbedding(torch.arange(28).float().view(7, 4))
+    original.weight.directory = tmp_path
     original.weight.materialize_()
     copied = copy.deepcopy(original)
     with torch.no_grad():
