@@ -27,7 +27,6 @@ _QSA_INDEXER_QUERY_CHUNK_SIZE = 256
 _QSA_ATTENTION_MAX_KV_BYTES = 1 << 30
 
 
-@torch.no_grad()
 def qsa_indexer_forward(
     indexer: Qwen4ExpTextQSAIndexer,
     hidden_states: torch.Tensor,
