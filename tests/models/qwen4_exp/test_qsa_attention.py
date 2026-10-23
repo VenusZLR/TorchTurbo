@@ -33,13 +33,12 @@ def _cpu_varlen_kernel(
 ):
     assert not causal
     assert cu_seqlens_q.dtype == cu_seqlens_k.dtype == torch.int32
-    assert torch.all(cu_seqlens_q.diff() == 1)
     assert int(cu_seqlens_q[-1]) == query.shape[0]
     assert int(cu_seqlens_k[-1]) == key.shape[0] == value.shape[0]
     outputs = []
     repeats = query.shape[1] // key.shape[1]
     for i, (start, stop) in enumerate(itertools.pairwise(cu_seqlens_k)):
-        q = query[i : i + 1].transpose(0, 1)
+        q = query[cu_seqlens_q[i] : cu_seqlens_q[i + 1]].transpose(0, 1)
         k = key[start:stop].repeat_interleave(repeats, dim=1).transpose(0, 1)
         v = value[start:stop].repeat_interleave(repeats, dim=1).transpose(0, 1)
         outputs.append(
@@ -65,7 +64,7 @@ def flash_calls(monkeypatch):
     calls = []
 
     def varlen(query, key, value, **kwargs):
-        calls.append((query.shape[0], key.shape[0]))
+        calls.append((kwargs["cu_seqlens_q"].numel() - 1, key.shape[0]))
         return _cpu_varlen_kernel(query, key, value, **kwargs)
 
     kernels = lazy_flash_attention_kernels(None, varlen)

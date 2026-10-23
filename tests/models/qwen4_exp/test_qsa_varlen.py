@@ -1,4 +1,4 @@
-"""Fused masked QSA must preserve independent Q/K/V and padding gradients."""
+"""Chunked varlen QSA preserves independent Q/K/V and padding gradients."""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ from functools import partial
 import pytest
 import torch
 import torch.nn.functional as F
+import transformers.modeling_flash_attention_utils as flash_utils
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.checkpoint import checkpoint
 
 from torchturbo.models.qwen4_exp import qsa
 
+from ..flash_attention_fakes import lazy_flash_attention_kernels
 from .test_model import _token_ids_to_mask
+from .test_qsa_attention import _cpu_varlen_kernel, _flash_kwargs
 
 
 def _reference_attention(inputs, token_ids, scale=None, target_dtype=None):
@@ -59,27 +62,23 @@ def _inputs(batch_size, key_length, dtype, padding_only, head_dim):
 @pytest.mark.parametrize("checkpoint_mode", [None, False, True])
 @pytest.mark.parametrize("padding_only", [False, True])
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_internal_mask_preserves_selection_and_independent_gradients(
+def test_varlen_chunks_preserve_selection_and_independent_gradients(
     monkeypatch, checkpoint_mode, padding_only, batch_size
 ):
     calls = []
 
-    original = qsa.attention_forward
+    def varlen(query, key, value, **kwargs):
+        assert kwargs["cu_seqlens_q"].numel() - 1 <= batch_size * 5
+        calls.append(query.shape)
+        return _cpu_varlen_kernel(query, key, value, **kwargs)
 
-    def masked(query, key, value, mask, query_length, is_causal, **kwargs):
-        assert mask.is_contiguous() and mask.dtype == torch.bool
-        assert mask.shape[-2] <= 5
-        assert mask.any(dim=-1).all()
-        assert not is_causal
-        calls.append(mask.shape)
-        return original(query, key, value, mask, query_length, is_causal, **kwargs)
-
-    monkeypatch.setattr(qsa, "attention_forward", masked)
-    monkeypatch.setattr(qsa, "_QSA_DENSE_MASK_MAX_BYTES", batch_size * 18 * 5)
+    kernels = lazy_flash_attention_kernels(None, varlen)
+    monkeypatch.setattr(flash_utils, "lazy_import_flash_attention", lambda *a, **k: (kernels, _flash_kwargs))
+    monkeypatch.setattr(qsa, "_QSA_ATTENTION_MAX_KV_BYTES", batch_size * 2051 * 2 * 8 * 4 * 2 * 5)
     inputs, ids = _inputs(batch_size, 17, torch.float32, padding_only, 8)
     reference = [t.detach().clone().requires_grad_() for t in inputs]
     function = partial(
-        qsa._qsa_masked_attention, softmax_scale=0.19, target_dtype=None
+        qsa.qsa_attention_forward, softmax_scale=0.19, target_dtype=None
     )
     output = (
         function(*inputs, ids)
@@ -93,30 +92,33 @@ def test_internal_mask_preserves_selection_and_independent_gradients(
     expected.backward(probe)
     for actual, ref in zip(inputs, reference):
         torch.testing.assert_close(actual.grad, ref.grad)
-    assert len(calls) >= 4
+    if padding_only:
+        assert not calls
+    else:
+        assert len(calls) >= 3
 
 
 @pytest.mark.skipif(
-    os.getenv("TORCH_TURBO_TEST_QSA_MASKED_NPU") != "1", reason="opt-in native NPU"
+    os.getenv("TORCH_TURBO_TEST_QSA_VARLEN_NPU") != "1", reason="opt-in native NPU"
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("checkpoint_mode", [None, False, True])
 @pytest.mark.parametrize("padding_only", [False, True])
 @pytest.mark.parametrize("key_length", [17, 4096])
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_native_dense_mask_output_and_gradients(
+def test_native_varlen_output_and_gradients(
     monkeypatch, dtype, checkpoint_mode, padding_only, key_length, batch_size
 ):
     pytest.importorskip("torch_npu")
     monkeypatch.setattr(
-        qsa, "_QSA_DENSE_MASK_MAX_BYTES", batch_size * (key_length + 1) * 5
+        qsa, "_QSA_ATTENTION_MAX_KV_BYTES", batch_size * 2051 * 2 * 256 * 2 * 2 * 5
     )
     inputs, ids = _inputs(batch_size, key_length, dtype, padding_only, 256)
     device_inputs = [
         t.detach().to(device="npu", dtype=dtype).requires_grad_() for t in inputs
     ]
     function = partial(
-        qsa._qsa_masked_attention, softmax_scale=None, target_dtype=None
+        qsa.qsa_attention_forward, softmax_scale=None, target_dtype=None
     )
     output = (
         function(*device_inputs, ids.to("npu"))

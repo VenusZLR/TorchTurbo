@@ -105,7 +105,7 @@ def _cpu_qsa_varlen_attention(
 ) -> torch.Tensor:
     outputs = []
     for query_idx in range(cu_seq_lens_q.numel() - 1):
-        q = query[:, query_idx : query_idx + 1].transpose(1, 2)
+        q = query[:, cu_seq_lens_q[query_idx] : cu_seq_lens_q[query_idx + 1]].transpose(1, 2)
         key_start = int(cu_seq_lens_k[query_idx])
         key_stop = int(cu_seq_lens_k[query_idx + 1])
         k = key[:, key_start:key_stop].transpose(1, 2)
@@ -669,10 +669,12 @@ def test_qsa_attention_matches_masked_reference_and_gradients(monkeypatch) -> No
         softmax_scale=8**-0.5,
     )
 
-    assert captured["query"].shape == (1, 3, 4, 8)
+    assert captured["query"].shape[1] == int(captured["cu_q"][-1])
+    assert captured["query"].shape[1] * captured["query"].shape[2] == 3 * 4
     assert captured["key"].shape == (1, 6, 2, 8)
     torch.testing.assert_close(
-        captured["cu_q"], torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        captured["cu_q"],
+        torch.arange(4, dtype=torch.int32) * (4 // captured["query"].shape[2]),
     )
     torch.testing.assert_close(
         captured["cu_k"], torch.tensor([0, 1, 3, 6], dtype=torch.int32)

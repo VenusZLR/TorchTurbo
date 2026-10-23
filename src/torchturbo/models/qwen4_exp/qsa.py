@@ -21,7 +21,6 @@ from .modeling_qwen4_exp import (
 )
 
 _QSA_INDEXER_QUERY_CHUNK_SIZE = 256
-_QSA_DENSE_MASK_MAX_BYTES = 256 * 1024 * 1024
 # Expanded KV rows are transient: each chunk is checkpointed, so this bounds
 # peak memory rather than saved activations. Real head sizes need about 4 MiB
 # per query, and small chunks make the varlen kernels launch-bound.
@@ -219,47 +218,6 @@ def _qsa_attention_chunk(
     return output.view(batch_size, query_length, *output.shape[1:])
 
 
-def _qsa_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    token_ids: torch.Tensor,
-    softmax_scale: float | None,
-    target_dtype: torch.dtype | None,
-    *,
-    dropout: float = 0.0,
-) -> torch.Tensor:
-    """Build bounded QSA masks for the shared attention interface."""
-    if query.dtype == torch.float32 and target_dtype is not None:
-        query, key, value = (tensor.to(target_dtype) for tensor in (query, key, value))
-    batch_size, query_length = query.shape[:2]
-    key_length = key.shape[1]
-    chunk_size = max(1, _QSA_DENSE_MASK_MAX_BYTES // (batch_size * (key_length + 1)))
-    # Reuse head-major storage across query chunks without copying global KV again.
-    key = key.transpose(1, 2).contiguous().transpose(1, 2)
-    value = value.transpose(1, 2).contiguous().transpose(1, 2)
-    outputs = []
-    for start in range(0, query_length, chunk_size):
-        stop = min(start + chunk_size, query_length)
-        indices = token_ids[:, start:stop]
-        valid_queries = (indices >= 0).any(dim=-1)
-        indices = torch.where(indices >= 0, indices, key_length)
-        allowed = torch.zeros(
-            batch_size, stop - start, key_length + 1, dtype=torch.bool, device=query.device
-        )
-        allowed.scatter_(-1, indices, True)
-        # Keep padding rows finite and retain every SP backward collective.
-        allowed[..., 0].logical_or_(~valid_queries)
-        mask = allowed[..., :key_length].unsqueeze(1).contiguous()
-        del allowed
-        output = attention_forward(
-            query[:, start:stop], key, value, mask, stop - start, False,
-            dropout=dropout, softmax_scale=softmax_scale,
-        )
-        outputs.append(torch.where(valid_queries[:, :, None, None], output, 0))
-    return torch.cat(outputs, dim=1)
-
-
 def qsa_attention_forward(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -272,20 +230,10 @@ def qsa_attention_forward(
 ) -> torch.Tensor:
     """Run local queries against selected global KV rows in BSND layout.
 
-    Selection already enforces causality and sample boundaries. Supported NPU
-    inputs use fused attention with bounded internal masks. The portable FA2
-    path checkpoints selected-row chunks to bound expanded KV.
+    Selection already enforces causality and sample boundaries. Each query
+    and its selected KV rows form an independent varlen sequence. Selected-row
+    chunks are checkpointed to bound expanded KV activations.
     """
-    if query_states.device.type == "npu":
-        return _qsa_masked_attention(
-            query_states,
-            key_states,
-            value_states,
-            qsa_token_ids,
-            softmax_scale,
-            target_dtype,
-            dropout=dropout,
-        )
     key_bytes = key_states.shape[2] * key_states.shape[3] * key_states.element_size()
     value_bytes = (
         value_states.shape[2] * value_states.shape[3] * value_states.element_size()

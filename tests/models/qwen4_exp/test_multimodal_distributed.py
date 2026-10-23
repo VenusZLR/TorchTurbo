@@ -14,13 +14,11 @@ from transformers.vision_utils import (
     get_vision_position_ids,
 )
 
-from torchturbo.models.modules.attention.interface import attention_forward
 from torchturbo.models.modules.attention.ulysses import (
     patch_forward_for_sp_input_slicing,
     ulysses_pad_inputs,
 )
 from torchturbo.models.modules.cpu_resident import CPUResidentParameter
-from torchturbo.models.qwen4_exp import qsa
 from torchturbo.models.qwen4_exp.model import TurboQwen4ExpForConditionalGeneration
 from torchturbo.ops import OpPolicy, get_or_create_ops
 from torchturbo.runtime.cpu import CpuRuntime
@@ -30,7 +28,7 @@ from .test_multimodal import _cpu_flash
 from .test_ple_distributed import _init_process_group
 
 
-def _check_full_model_sp(rank, init_file, modality, reentrant, backend):
+def _check_full_model_sp(rank, init_file, modality, reentrant):
     import transformers.modeling_utils as hf_modeling
 
     get_or_create_ops(device_runtime=CpuRuntime(), default_policy=OpPolicy.NATIVE)
@@ -59,12 +57,12 @@ def _check_full_model_sp(rank, init_file, modality, reentrant, backend):
             monkeypatch.setattr(
                 "torchturbo.models.qwen4_exp.qsa.attention_forward", _cpu_flash
             )
-            _compare_full_model_sp(rank, modality, reentrant, backend, monkeypatch)
+            _compare_full_model_sp(rank, modality, reentrant, monkeypatch)
     finally:
         dist.destroy_process_group()
 
 
-def _compare_full_model_sp(rank, modality, reentrant, backend, monkeypatch):
+def _compare_full_model_sp(rank, modality, reentrant, monkeypatch):
     config = _small_config()
     config.text_config.layer_types = ["full_attention"] * 4
     config.image_token_id, config.video_token_id = 20, 22
@@ -187,23 +185,9 @@ def _compare_full_model_sp(rank, modality, reentrant, backend, monkeypatch):
     expected.backward(probe)
     assert len(reference_lookups) == 1
     assert lookups == []
-    masked_calls = []
-    if backend == "masked":
-        def masked_attention(*args, **kwargs):
-            masked_calls.append(args[1].shape[1])
-            return attention_forward(*args, **kwargs)
-
-        def masked_qsa(query, key, value, ids, **kwargs):
-            return qsa._qsa_masked_attention(
-                query, key, value, ids, kwargs.get("softmax_scale"),
-                kwargs.get("target_dtype"), dropout=kwargs.get("dropout", 0.0),
-            )
-
-        monkeypatch.setattr(qsa, "attention_forward", masked_attention)
-        monkeypatch.setattr(qsa, "qsa_attention_forward", masked_qsa)
     actual = model(**padded).logits
     context = (
-        f"rank={rank}, modality={modality}, checkpoint={reentrant}, backend={backend}"
+        f"rank={rank}, modality={modality}, checkpoint={reentrant}"
     )
     torch.testing.assert_close(
         actual, expected[:, local_slice], atol=2e-6, rtol=2e-5, msg=context
@@ -211,10 +195,6 @@ def _compare_full_model_sp(rank, modality, reentrant, backend, monkeypatch):
     assert len(lookups) == 1
     assert decoder_calls == [1] * 4
     actual.backward(probe[:, local_slice])
-    if backend == "masked":
-        assert masked_calls and set(masked_calls) == {
-            padded["input_ids"].shape[1]
-        }
     assert len(lookups) == 1
     assert all(calls >= 2 for calls in decoder_calls)
     for handle in handles:
@@ -272,13 +252,12 @@ def _compare_full_model_sp(rank, modality, reentrant, backend, monkeypatch):
 )
 @pytest.mark.parametrize("modality", ["image", "video"])
 @pytest.mark.parametrize("reentrant", [False, True], ids=["non_reentrant", "reentrant"])
-@pytest.mark.parametrize("backend", ["fa2", "masked"])
 def test_full_model_sp_media_fusion_with_decoder_checkpointing(
-    tmp_path, modality, reentrant, backend
+    tmp_path, modality, reentrant
 ):
     mp.spawn(
         _check_full_model_sp,
-        args=(str(tmp_path / "full-model-init"), modality, reentrant, backend),
+        args=(str(tmp_path / "full-model-init"), modality, reentrant),
         nprocs=2,
         join=True,
     )

@@ -4,7 +4,6 @@ import math
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 from torchturbo.ops import ops
@@ -76,9 +75,8 @@ def attention_forward(
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Run HF-compatible attention, optionally returning per-head maxima.
 
-    Inputs and outputs use BSND layout. Ordinary attention with a 4D mask uses
-    PyTorch SDPA; other inputs delegate to the original HF helper.
-    Maximum-logit attention follows HF's mask-first
+    Inputs and outputs use BSND layout. Ordinary attention delegates to the
+    original HF helper. Maximum-logit attention follows HF's mask-first
     dispatch, passing sequence lengths directly to the registered provider.
     Maximum-logit attention currently supports full MLA self-attention with
     equal Q/K/V head counts, after RoPE and any sequence-parallel exchange.
@@ -88,9 +86,8 @@ def attention_forward(
         query_states: Query activations in BSND layout.
         key_states: Key activations in BSND layout.
         value_states: Value activations in BSND layout.
-        attention_mask: HF padding mask, or a 4D SDPA mask with True marking
-            allowed edges or floating-point additive scores. Ordinary 4D
-            attention uses native SDPA; maximum logits support 4D masks on CPU.
+        attention_mask: HF mask; maximum logits support integer sequence IDs
+            with zero padding, or 4D masks for the CPU reference.
         query_length: Query sequence length, matching the HF helper contract.
         is_causal: Whether each sequence uses causal attention.
         dropout: Attention probability dropout.
@@ -114,31 +111,6 @@ def attention_forward(
         The attention output, or (output, head maxima) when requested.
     """
     if not return_max_logits:
-        if attention_mask is not None and attention_mask.ndim == 4:
-            from transformers.modeling_flash_attention_utils import fa_peft_integration_check
-
-            if sliding_window is not None or softcap not in (None, 0.0) or deterministic or kwargs:
-                raise ValueError(
-                    "4D masked SDPA does not support window, softcap, deterministic or extra backend options."
-                )
-            query, key, value = fa_peft_integration_check(
-                query_states, key_states, value_states, target_dtype
-            )
-            if is_causal and not (use_top_left_mask and query_length == 1):
-                offset = 0 if use_top_left_mask else key.shape[1] - query.shape[1]
-                causal_mask = torch.arange(key.shape[1], device=query.device)[None, :] <= (
-                    torch.arange(query.shape[1], device=query.device)[:, None] + offset
-                )
-                attention_mask = (
-                    attention_mask & causal_mask
-                    if attention_mask.dtype == torch.bool
-                    else attention_mask.masked_fill(~causal_mask, -torch.inf)
-                )
-            return F.scaled_dot_product_attention(
-                query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
-                attn_mask=attention_mask, dropout_p=dropout, scale=softmax_scale,
-                enable_gqa=query.shape[2] != key.shape[2],
-            ).transpose(1, 2)
         from transformers.modeling_flash_attention_utils import (
             _flash_attention_forward,
         )

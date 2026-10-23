@@ -24,7 +24,7 @@ from torchturbo.runtime.npu import NpuRuntime
 from ..flash_attention_fakes import lazy_flash_attention_kernels
 from .test_model import _small_config
 from .test_qsa_attention import _cpu_varlen_kernel, _flash_kwargs
-from .test_qsa_dense_mask import _reference_attention
+from .test_qsa_varlen import _reference_attention
 
 
 def _check_qsa(
@@ -118,7 +118,7 @@ def _check_qsa(
         )
 
 
-def _run_qsa(rank: int, init_file: str, backend: str) -> None:
+def _run_qsa(rank: int, init_file: str, ratio12: bool) -> None:
     torch.set_num_threads(1)
     os.environ.setdefault(
         "GLOO_SOCKET_IFNAME",
@@ -143,42 +143,18 @@ def _run_qsa(rank: int, init_file: str, backend: str) -> None:
             ),
             patch.object(qsa, "_QSA_INDEXER_QUERY_CHUNK_SIZE", 3),
             patch.object(qsa, "_QSA_ATTENTION_MAX_KV_BYTES", 8192),
-            pytest.MonkeyPatch.context() as monkeypatch,
         ):
-            masked_calls = []
-            if backend.startswith("masked"):
-                shared_attention = qsa.attention_forward
-
-                def masked_attention(*args, **kwargs):
-                    masked_calls.append((args[0].shape[2], args[1].shape[1]))
-                    return shared_attention(*args, **kwargs)
-
-                def masked_qsa(query, key, value, ids, **kwargs):
-                    return qsa._qsa_masked_attention(
-                        query, key, value, ids, kwargs.get("softmax_scale"),
-                        kwargs.get("target_dtype"), dropout=kwargs.get("dropout", 0.0),
-                    )
-
-                monkeypatch.setattr(qsa, "attention_forward", masked_attention)
-                monkeypatch.setattr(qsa, "qsa_attention_forward", masked_qsa)
             # Cross-rank samples, an entirely padded rank, and no padding.
-            checkpoint_modes = (
-                (None, False, True) if backend == "masked_ratio12" else (None,)
-            )
+            checkpoint_modes = (None, False, True)
             for checkpoint_mode in checkpoint_modes:
                 for lengths in ((3, 24, 2), (3, 8), (5, 27)):
                     _check_qsa(
                         groups[group_id],
                         group_id,
                         lengths,
-                        ratio12=backend == "masked_ratio12",
+                        ratio12=ratio12,
                         checkpoint_mode=checkpoint_mode,
                     )
-            if backend.startswith("masked"):
-                expected = (
-                    {(24, 32)} if backend == "masked_ratio12" else {(4, 32)}
-                )
-                assert masked_calls and set(masked_calls) == expected
     finally:
         dist.destroy_process_group()
 
@@ -187,17 +163,17 @@ def _run_qsa(rank: int, init_file: str, backend: str) -> None:
     not (dist.is_available() and dist.is_gloo_available()),
     reason="requires torch.distributed with Gloo support",
 )
-@pytest.mark.parametrize("backend", ["fa2", "masked", "masked_ratio12"])
-def test_qsa_matches_transformers_across_sp_groups(tmp_path, backend) -> None:
+@pytest.mark.parametrize("ratio12", [False, True], ids=["gqa4", "gqa12"])
+def test_qsa_matches_transformers_across_sp_groups(tmp_path, ratio12) -> None:
     mp.spawn(
         _run_qsa,
-        args=(str(tmp_path / "qsa-sp"), backend),
+        args=(str(tmp_path / "qsa-sp"), ratio12),
         nprocs=4,
         join=True,
     )
 
 
-def _run_native_qsa_masked(rank: int, init_file: str, dtype: torch.dtype) -> None:
+def _run_native_qsa_varlen(rank: int, init_file: str, dtype: torch.dtype) -> None:
     import torch_npu  # noqa: F401 - registers the NPU device and HCCL backend.
 
     torch.set_num_threads(1)
@@ -214,7 +190,7 @@ def _run_native_qsa_masked(rank: int, init_file: str, dtype: torch.dtype) -> Non
         with patch.object(runtime_impl, "_SELECTED_RUNTIME", NpuRuntime()):
             for checkpoint_mode in (None, False, True):
                 for lengths in ((3, 24, 2), (3, 8), (5, 27)):
-                    _check_native_qsa_masked(rank, dtype, lengths, checkpoint_mode)
+                    _check_native_qsa_varlen(rank, dtype, lengths, checkpoint_mode)
             # Keep the faster rank from tearing down HCCL while its peer is
             # still reading asynchronous reduce-scatter results.
             torch.npu.synchronize()
@@ -224,7 +200,7 @@ def _run_native_qsa_masked(rank: int, init_file: str, dtype: torch.dtype) -> Non
         dist.destroy_process_group()
 
 
-def _check_native_qsa_masked(
+def _check_native_qsa_varlen(
     rank: int,
     dtype: torch.dtype,
     lengths: tuple[int, ...],
@@ -289,16 +265,16 @@ def _check_native_qsa_masked(
 
 
 @pytest.mark.skipif(
-    os.environ.get("TORCH_TURBO_TEST_QSA_MASKED_NPU") != "1",
-    reason="opt-in native NPU masked attention with HCCL sequence parallelism",
+    os.environ.get("TORCH_TURBO_TEST_QSA_VARLEN_NPU") != "1",
+    reason="opt-in native NPU varlen attention with HCCL sequence parallelism",
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_native_masked_ratio12_packed_sp2(tmp_path, dtype) -> None:
+def test_native_varlen_ratio12_packed_sp2(tmp_path, dtype) -> None:
     pytest.importorskip("torch_npu")
     if torch.npu.device_count() < 2:
         pytest.skip("requires two NPUs")
     mp.spawn(
-        _run_native_qsa_masked,
+        _run_native_qsa_varlen,
         args=(str(tmp_path / "qsa-native-sp"), dtype),
         nprocs=2,
         join=True,
