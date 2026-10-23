@@ -1453,9 +1453,7 @@ class FSDP2Backend(BaseBackend):
     def _clip_grad_norm_cpu_offload(
         self, moe_params, params, ignored_params, max_norm, norm_type
     ):
-        """Grad-norm + clip for the FSDP2 CPU-offload path — fully chunked on the
-        compute device (peak GPU mem = one chunk, ``CLIP_CHUNK_BYTES``).
-        """
+        """Scale and clip CPU-offloaded gradients in device-sized chunks."""
         all_params = list(moe_params) + list(params) + list(ignored_params)
         reduce_device = self.device if not isinstance(self.device, str) else torch.device(self.device)
         world_group = dist.group.WORLD
@@ -1463,15 +1461,8 @@ class FSDP2Backend(BaseBackend):
         offloaded = [p for p in all_params if hasattr(p.grad, "_local_tensor")]
         plain_grads = [p.grad for p in all_params if not hasattr(p.grad, "_local_tensor")]
 
-        # --- Pass 1: moe gradient scaling (1/ep), chunked on the device, before
-        # the norm so the norm sees the ep-corrected moe grads.
-        if moe_params:
-            for chunk in self._iter_offloaded_chunks(moe_params):
-                self._scale_offloaded_chunk_on_device(
-                    chunk, reduce_device, self.gradient_scaling_factor
-                )
-
-        # --- Pass 2: global norm, chunked on the device.
+        # Scale expert gradients and accumulate their norm in the same device
+        # chunk, avoiding another H2D transfer of the scaled CPU gradients.
         def _accumulate(t, acc):
             if t.numel() == 0:
                 return acc
@@ -1481,11 +1472,24 @@ class FSDP2Backend(BaseBackend):
             return acc + (t.detach().float().abs() ** norm_type).sum()
 
         acc = torch.zeros((), device=reduce_device, dtype=torch.float32)
-        for chunk in self._iter_offloaded_chunks(offloaded):
-            chunk_dev = [l.to(reduce_device, non_blocking=True) for l in chunk]
-            self.device_runtime.synchronize()  # H2D complete before reading chunk_dev
-            for t in chunk_dev:
-                acc = _accumulate(t, acc)
+        for grad_params, scale_moe in (
+            (moe_params, True),
+            (params + ignored_params, False),
+        ):
+            for chunk in self._iter_offloaded_chunks(grad_params):
+                chunk_dev = [
+                    local.to(reduce_device, non_blocking=True) for local in chunk
+                ]
+                self.device_runtime.synchronize()
+                if scale_moe:
+                    torch._foreach_mul_(chunk_dev, self.gradient_scaling_factor)
+                    self.device_runtime.synchronize()
+                for tensor in chunk_dev:
+                    acc = _accumulate(tensor, acc)
+                if scale_moe:
+                    torch._foreach_copy_(chunk, chunk_dev)
+                    self.device_runtime.synchronize()
+                del tensor, chunk_dev
         # MAX reduction can hide a rank-local NaN.
         local_norm = acc.clone()
         reduce_op = dist.ReduceOp.MAX if norm_type == float("inf") else dist.ReduceOp.SUM
@@ -1496,7 +1500,7 @@ class FSDP2Backend(BaseBackend):
         total_norm = acc if norm_type == float("inf") else acc ** (1.0 / norm_type)
         assert_finite(torch.stack((local_norm, total_norm)), "gradient norm")
 
-        # --- Pass 3: clip scaling, chunked on the device.
+        # Clip the scaled CPU gradients, chunked on the device.
         clip_coef = float(max_norm) / (float(total_norm) + 1e-6)
         if clip_coef < 1.0:
             coef = min(clip_coef, 1.0)
