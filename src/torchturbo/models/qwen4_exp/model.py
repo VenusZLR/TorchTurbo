@@ -11,6 +11,7 @@ from transformers import AutoModel, AutoModelForImageTextToText
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from torchturbo.engine.config import ParameterGroup
+from torchturbo.ops import ops
 from torchturbo.runtime import get_device_runtime
 
 from ..base import TurboVLMModel
@@ -26,6 +27,7 @@ from .modeling_qwen4_exp import (
     Qwen4ExpForConditionalGeneration,
     Qwen4ExpPreTrainedModel,
     Qwen4ExpTextModel,
+    Qwen4ExpTextRMSNorm,
     Qwen4ExpVisionModel,
     Qwen4ExpVisionRotaryEmbedding,
 )
@@ -35,6 +37,15 @@ from .ple import (
     ple_forward,
 )
 from .qsa import qsa_forward
+
+
+def _group_rms_norm(
+    module: Qwen4ExpTextRMSNorm, hidden_states: torch.Tensor
+) -> torch.Tensor:
+    """Normalize each group while leaving learned FP32 scaling to forward."""
+    rows = hidden_states.reshape(-1, module.group_size)
+    weight = hidden_states.new_ones(module.group_size)
+    return ops.rms_norm(rows, weight, module.eps).reshape_as(hidden_states)
 
 
 def _filter_vision_packing_kwargs(
@@ -150,6 +161,9 @@ class TurboQwen4ExpForConditionalGeneration(
         self.model.visual.register_forward_pre_hook(
             _filter_vision_packing_kwargs, with_kwargs=True
         )
+        for module in self.modules():
+            if isinstance(module, Qwen4ExpTextRMSNorm) and module.group_size is not None:
+                module._norm = MethodType(_group_rms_norm, module)
         for layer in self.model.language_model.layers:
             if layer.layer_type == "full_attention":
                 layer.self_attn.forward = MethodType(qsa_forward, layer.self_attn)
