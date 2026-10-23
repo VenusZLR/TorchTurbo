@@ -193,8 +193,16 @@ def _qsa_attention_chunk(
     selected_key = key.flatten(0, 1).index_select(0, key_indices)
     selected_value = value.flatten(0, 1).index_select(0, key_indices)
     lengths = lengths.index_select(0, query_indices).to(torch.int32)
+    num_queries = query_indices.numel()
+    num_kv_heads = key.shape[2]
+    heads_per_kv = query.shape[2] // num_kv_heads
+    # Queries sharing one KV head are independent softmax rows. Folding those
+    # heads into the query sequence preserves every score and KV derivative.
+    selected_query = selected_query.unflatten(1, (num_kv_heads, heads_per_kv))
+    selected_query = selected_query.transpose(1, 2).flatten(0, 1)
     cu_query = torch.arange(
-        query_indices.numel() + 1, dtype=torch.int32, device=query.device
+        0, (num_queries + 1) * heads_per_kv, heads_per_kv,
+        dtype=torch.int32, device=query.device,
     )
     cu_key = torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=torch.int32)))
 
@@ -210,11 +218,14 @@ def _qsa_attention_chunk(
         target_dtype=target_dtype,
         cu_seq_lens_q=cu_query,
         cu_seq_lens_k=cu_key,
-        max_length_q=1,
+        max_length_q=heads_per_kv,
         max_length_k=token_ids.shape[-1],
         attn_implementation="flash_attention_2",
     )
-    output = output.index_copy(0, query_indices, selected_output.flatten(0, 1))
+    selected_output = selected_output.reshape(
+        num_queries, heads_per_kv, num_kv_heads, value.shape[-1]
+    ).transpose(1, 2).flatten(1, 2)
+    output = output.index_copy(0, query_indices, selected_output)
     return output.view(batch_size, query_length, *output.shape[1:])
 
 
