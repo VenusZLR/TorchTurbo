@@ -12,7 +12,7 @@ import transformers.modeling_flash_attention_utils as flash_utils
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.checkpoint import checkpoint
 
-from torchturbo.models.qwen4_exp import npu, qsa
+from torchturbo.models.qwen4_exp import qsa
 from torchturbo.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextAttention
 
 from ..flash_attention_fakes import lazy_flash_attention_kernels, process_flash_kwargs
@@ -243,7 +243,6 @@ def test_padding_only_qsa_retains_zero_gradients(flash_calls) -> None:
 def test_qsa_preserves_flash_dtype_correction(
     monkeypatch, flash_calls, target_dtype, input_dtype, padding_only, needs_grad
 ) -> None:
-    monkeypatch.setattr(npu, "can_use_sparse_flash_attention", lambda *a, **k: False)
     torch.manual_seed(27)
     inputs = [
         torch.randn(1, 5, heads, 4, dtype=input_dtype, requires_grad=needs_grad)
@@ -331,8 +330,6 @@ def test_qsa_device_kernel_matches_dense_reference(monkeypatch, device_type) -> 
         if not torch.npu.is_available():
             pytest.skip("requires an NPU")
 
-    # Keep explicit native FA2 coverage alongside the opt-in SFA contract test.
-    monkeypatch.setattr(npu, "can_use_sparse_flash_attention", lambda *a, **k: False)
     torch.manual_seed(19)
     query = torch.randn(1, 17, 4, 32).to(torch.bfloat16).float().requires_grad_()
     key = torch.randn(1, 17, 2, 32).to(torch.bfloat16).float().requires_grad_()
